@@ -736,6 +736,11 @@ var st,ct,ut,lt,dt,ht,pt,gt,ft,mt=function(){function t(e,t,r){this.networkInter
           <button class="btn btn-sm" onclick="exportData()">Esporta</button>
         </div>
         <div class="settings-row">
+          <div><div class="settings-label">Importa dati</div><div class="settings-sub">Da un backup o da un'altra installazione</div></div>
+          <button class="btn btn-sm" onclick="document.getElementById('import-file').click()">Importa</button>
+          <input type="file" id="import-file" accept="application/json" style="display:none;" onchange="importData(event)">
+        </div>
+        <div class="settings-row">
           <div><div class="settings-label">Rianalizza email</div><div class="settings-sub">Azzera la memoria delle email già lette</div></div>
           <button class="btn btn-sm" onclick="resetSeenEmails()">Azzera</button>
         </div>
@@ -1607,6 +1612,59 @@ function exportData() {
   a.click();
 }
 
+function importData(event) {
+  const file = event.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    try {
+      const data = JSON.parse(reader.result);
+      let imported = { tasks: 0, email: 0 };
+
+      // Importa task, evitando duplicati con quelli già presenti
+      if (Array.isArray(data.tasks)) {
+        const existing = getTasks();
+        const existingTexts = new Set(existing.map(t => t.text.trim().toLowerCase()));
+        data.tasks.forEach(t => {
+          if (t.text && !existingTexts.has(t.text.trim().toLowerCase())) {
+            existing.push(t);
+            existingTexts.add(t.text.trim().toLowerCase());
+            imported.tasks++;
+          }
+        });
+        saveTasks(existing);
+      }
+
+      // Importa cronologia email
+      if (Array.isArray(data.emailHist)) {
+        const existingHist = DB.get('email_hist') || [];
+        const merged = [...data.emailHist, ...existingHist].slice(0, 20);
+        DB.set('email_hist', merged);
+        imported.email = data.emailHist.length;
+      }
+
+      // Importa contesto e configurazione progetto solo se non già presenti
+      if (data.context && !getContext()) {
+        DB.set('context', data.context);
+        const ctxEl = document.getElementById('ctx-notes');
+        if (ctxEl) ctxEl.value = data.context;
+      }
+      if (data.projConfig && !DB.get('proj_config')) {
+        DB.set('proj_config', data.projConfig);
+      }
+
+      toast(`✓ Importati ${imported.tasks} task, ${imported.email} email`);
+      renderTasks(currentFilter);
+      renderEmailHistory();
+      updateMetrics();
+    } catch(e) {
+      toast('⚠️ File non valido — deve essere un export di IT Assistant');
+    }
+  };
+  reader.readAsText(file);
+  event.target.value = ''; // reset per permettere ri-selezione stesso file
+}
+
 function resetData() {
   if (!confirm('Sicuro? Tutti i task e dati verranno cancellati.')) return;
   ['tasks','email_hist','context','seen_emails','proj_config'].forEach(k => DB.del(k));
@@ -2012,11 +2070,15 @@ window.addEventListener('DOMContentLoaded', () => {
 
   document.getElementById('filter-all').classList.add('btn-primary');
 
-  // Registra Service Worker per PWA installabile
+  // Service Worker disattivato temporaneamente (causava conflitti con l'installazione PWA su iOS)
+  // Rimuove eventuali SW già registrati in precedenza per pulire lo stato
   if ('serviceWorker' in navigator) {
-    navigator.serviceWorker.register('/sw.js')
-      .then(() => console.log('SW registered'))
-      .catch(e => console.log('SW error:', e));
+    navigator.serviceWorker.getRegistrations().then(regs => {
+      regs.forEach(reg => reg.unregister());
+    });
+    if ('caches' in window) {
+      caches.keys().then(names => names.forEach(n => caches.delete(n)));
+    }
   }
 
   // Init MSAL se già configurato
