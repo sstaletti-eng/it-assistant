@@ -337,6 +337,7 @@ var st,ct,ut,lt,dt,ht,pt,gt,ft,mt=function(){function t(e,t,r){this.networkInter
     <button class="nav-btn" onclick="showTab('tasks',this)">Task</button>
     <button class="nav-btn" onclick="showTab('timeline',this)">Progetto</button>
     <button class="nav-btn" onclick="showTab('meeting',this)">Riunione</button>
+    <button class="nav-btn" onclick="showTab('kb',this)">KB</button>
     <button class="nav-btn" onclick="showTab('settings',this)">⚙</button>
   </div>
 
@@ -629,6 +630,40 @@ var st,ct,ut,lt,dt,ht,pt,gt,ft,mt=function(){function t(e,t,r){this.networkInter
       <div class="ai-result hidden" id="meeting-result"></div>
     </div>
 
+    <!-- ═══ KNOWLEDGE BASE ═══ -->
+    <div id="tab-kb" class="section">
+      <div class="card">
+        <div class="card-label">📚 Knowledge Base</div>
+        <div style="font-size:12px; color:var(--text2); margin-bottom:12px; line-height:1.5;">Carica offerte, contratti, schede tecniche. L'AI li userà come riferimento quando fai domande in Chat o generi briefing. I file restano solo sul tuo dispositivo.</div>
+        <input type="file" id="kb-file" accept="application/pdf" style="display:none;" onchange="onKbFileSelected(event)">
+        <button class="rec-btn" onclick="document.getElementById('kb-file').click()">
+          <span id="kb-drop-label">📎 Carica un documento PDF</span>
+        </button>
+        <div id="kb-upload-status" style="display:none; margin-top:10px; font-size:12px; color:var(--text2);"></div>
+      </div>
+
+      <div class="card">
+        <div class="card-label">Documenti caricati (<span id="kb-count">0</span>)</div>
+        <div id="kb-list">
+          <div class="empty"><div class="empty-icon">📂</div>Nessun documento nella knowledge base</div>
+        </div>
+        <div id="kb-storage-info" style="font-size:11px; color:var(--text3); margin-top:10px;"></div>
+      </div>
+
+      <div class="card">
+        <div class="card-label">Interroga la knowledge base</div>
+        <div class="input-group">
+          <label>Fai una domanda sui documenti caricati</label>
+          <textarea id="kb-question" rows="3" placeholder="Es: Qual è il costo totale dell'offerta GEP? Quali moduli sono inclusi? Che scadenze prevede il contratto?"></textarea>
+        </div>
+        <button class="btn btn-primary" onclick="askKnowledgeBase()">
+          <span id="kb-ask-spinner" class="spinner" style="display:none;"></span>
+          <span id="kb-ask-label">Chiedi alla KB</span>
+        </button>
+        <div class="ai-result hidden" id="kb-answer"></div>
+      </div>
+    </div>
+
     <!-- ═══ IMPOSTAZIONI ═══ -->
     <div id="tab-settings" class="section">
       <div class="card">
@@ -822,6 +857,22 @@ function esc(str) {
 
 function getApiKey() { return DB.get('apikey') || ''; }
 function getContext() { return DB.get('context') || document.getElementById('ctx-notes')?.value || ''; }
+
+// Contesto arricchito con i riassunti dei documenti KB (per briefing e analisi)
+async function getContextWithKB() {
+  let ctx = getContext();
+  try {
+    const docs = await kbGetAllDocs();
+    if (docs.length) {
+      ctx += '\n\n=== DOCUMENTI IN KNOWLEDGE BASE ===\n';
+      docs.forEach(d => {
+        ctx += `\n[${d.name}]: ${(d.summary||'').slice(0,300)}\n`;
+      });
+      ctx += '\nSe rilevante per la domanda, fai riferimento a questi documenti. Per dettagli precisi suggerisci di interrogare la KB.';
+    }
+  } catch(e) {}
+  return ctx;
+}
 function getTasks() { return DB.get('tasks') || []; }
 function saveTasks(t) { DB.set('tasks', t); }
 
@@ -853,6 +904,7 @@ function showTab(name, btn) {
   currentTab = name;
   if (name === 'tasks') renderTasks('all');
   if (name === 'briefing') updateMetrics();
+  if (name === 'kb') renderKbList();
 }
 
 // ═══════════════════════════════════════
@@ -1067,7 +1119,7 @@ async function generateBriefing() {
   const dKick = daysToMilestone(1);
   const dSsl = daysToMilestone(2);
 
-  const ctx2 = getContext();
+  const ctx2 = await getContextWithKB();
   const prompt = `Genera il briefing operativo mattutino per oggi.
 Contesto progetto: ${ctx2 || 'Non configurato — vai in Impostazioni e aggiungi il contesto.'}
 Dati task:
@@ -1533,7 +1585,7 @@ async function analyzeRisks() {
   const result = document.getElementById('risk-result');
   spinner.style.display = 'inline-block'; label.textContent = 'Analisi in corso...';
 
-  const ctx3 = getContext();
+  const ctx3 = await getContextWithKB();
   const text = await callAI(`Analizza i rischi del progetto basandoti sul contesto: ${ctx3 || 'Nessun contesto configurato.'}
 Identifica: rischi principali, probabilità, impatto, azioni immediate suggerite.`);
 
@@ -1904,7 +1956,7 @@ async function msLogin() {
   const tenantId = DB.get('graph_tenant_id');
   if (!clientId || !tenantId) {
     toast('⚠️ Prima salva Client ID e Tenant ID in Impostazioni');
-    showTab('settings', document.querySelectorAll('.nav-btn')[6]);
+    showTab('settings', document.querySelectorAll('.nav-btn')[7]);
     setTimeout(() => document.getElementById('s-email').scrollIntoView({behavior:'smooth'}), 200);
     return;
   }
@@ -2055,6 +2107,223 @@ async function fetchAndAnalyzeEmails() {
   } catch(e) {
     spinner.style.display='none'; label.textContent='📥 Scarica e analizza email';
     progress.textContent = 'Errore: ' + e.message; toast('Errore: ' + e.message);
+  }
+}
+
+// ═══════════════════════════════════════
+// KNOWLEDGE BASE (IndexedDB)
+// ═══════════════════════════════════════
+let kbDB = null;
+
+function initKbDB() {
+  return new Promise((resolve, reject) => {
+    if (kbDB) return resolve(kbDB);
+    const req = indexedDB.open('ita_kb', 1);
+    req.onupgradeneeded = e => {
+      const db = e.target.result;
+      if (!db.objectStoreNames.contains('docs')) {
+        db.createObjectStore('docs', { keyPath: 'id' });
+      }
+    };
+    req.onsuccess = e => { kbDB = e.target.result; resolve(kbDB); };
+    req.onerror = e => reject(e);
+  });
+}
+
+async function kbAddDoc(doc) {
+  const db = await initKbDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction('docs', 'readwrite');
+    tx.objectStore('docs').put(doc);
+    tx.oncomplete = () => resolve();
+    tx.onerror = e => reject(e);
+  });
+}
+
+async function kbGetAllDocs() {
+  const db = await initKbDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction('docs', 'readonly');
+    const req = tx.objectStore('docs').getAll();
+    req.onsuccess = () => resolve(req.result || []);
+    req.onerror = e => reject(e);
+  });
+}
+
+async function kbGetDoc(id) {
+  const db = await initKbDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction('docs', 'readonly');
+    const req = tx.objectStore('docs').get(id);
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = e => reject(e);
+  });
+}
+
+async function kbDeleteDoc(id) {
+  const db = await initKbDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction('docs', 'readwrite');
+    tx.objectStore('docs').delete(id);
+    tx.oncomplete = () => resolve();
+    tx.onerror = e => reject(e);
+  });
+}
+
+async function onKbFileSelected(event) {
+  const file = event.target.files[0];
+  if (!file) return;
+  if (file.type !== 'application/pdf') { toast('Solo file PDF'); return; }
+  if (file.size > 30 * 1024 * 1024) { toast('PDF troppo grande (max 30 MB)'); return; }
+
+  const status = document.getElementById('kb-upload-status');
+  status.style.display = 'block';
+  status.textContent = 'Lettura file...';
+
+  try {
+    // Leggi come base64
+    const base64 = await new Promise((res, rej) => {
+      const r = new FileReader();
+      r.onload = () => res(r.result.split(',')[1]);
+      r.onerror = rej;
+      r.readAsDataURL(file);
+    });
+
+    status.textContent = 'Indicizzazione con AI (riassunto)...';
+
+    // Genera un riassunto/indice del documento con l'AI
+    const key = getApiKey();
+    let summary = '';
+    if (key) {
+      try {
+        const res = await fetch('https://api.anthropic.com/v1/messages', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'x-api-key': key, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
+          body: JSON.stringify({
+            model: getModel('pdf'),
+            max_tokens: 800,
+            messages: [{
+              role: 'user',
+              content: [
+                { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: base64 } },
+                { type: 'text', text: 'Riassumi questo documento in modo strutturato per una knowledge base di progetto. Includi: tipo di documento, parti coinvolte, date/scadenze chiave, importi/costi se presenti, punti principali. Massimo 200 parole. Questo riassunto sarà usato come indice per ritrovare il documento.' }
+              ]
+            }]
+          })
+        });
+        const data = await res.json();
+        if (data.content?.[0]?.text) summary = data.content[0].text;
+        else if (data.error) summary = '(indicizzazione fallita: ' + data.error.message + ')';
+      } catch(e) { summary = '(indicizzazione non riuscita)'; }
+    } else {
+      summary = '(nessuna API key — riassunto non generato)';
+    }
+
+    const doc = {
+      id: Date.now().toString() + Math.random().toString(36).slice(2,6),
+      name: file.name,
+      size: file.size,
+      base64: base64,
+      summary: summary,
+      addedAt: new Date().toISOString()
+    };
+
+    await kbAddDoc(doc);
+    status.textContent = '✓ "' + file.name + '" aggiunto alla knowledge base';
+    toast('✓ Documento aggiunto');
+    renderKbList();
+    setTimeout(() => { status.style.display = 'none'; }, 3000);
+  } catch(e) {
+    status.textContent = 'Errore: ' + e.message;
+    toast('Errore caricamento');
+  }
+  event.target.value = '';
+}
+
+async function renderKbList() {
+  const docs = await kbGetAllDocs();
+  document.getElementById('kb-count').textContent = docs.length;
+  const el = document.getElementById('kb-list');
+  if (!docs.length) {
+    el.innerHTML = '<div class="empty"><div class="empty-icon">📂</div>Nessun documento nella knowledge base</div>';
+    document.getElementById('kb-storage-info').textContent = '';
+    return;
+  }
+  el.innerHTML = docs.map(d => `
+    <div class="todo-item">
+      <div class="todo-body">
+        <div class="todo-text" style="font-size:13px; font-weight:500;">📄 ${esc(d.name)}</div>
+        <div class="todo-meta">
+          <span class="badge badge-gray">${(d.size/1024).toFixed(0)} KB</span>
+          <span class="badge badge-gray">${new Date(d.addedAt).toLocaleDateString('it-CH')}</span>
+        </div>
+        <div style="font-size:11px; color:var(--text3); margin-top:6px; line-height:1.4;">${esc((d.summary||'').slice(0,150))}${d.summary && d.summary.length>150?'...':''}</div>
+      </div>
+      <button class="todo-del" onclick="removeKbDoc('${d.id}')" title="Elimina" style="opacity:1;">×</button>
+    </div>`).join('');
+
+  const totalMB = docs.reduce((s,d) => s + d.size, 0) / (1024*1024);
+  document.getElementById('kb-storage-info').textContent = `${docs.length} documenti · ${totalMB.toFixed(1)} MB usati`;
+}
+
+async function removeKbDoc(id) {
+  if (!confirm('Eliminare questo documento dalla knowledge base?')) return;
+  await kbDeleteDoc(id);
+  toast('Documento eliminato');
+  renderKbList();
+}
+
+async function askKnowledgeBase() {
+  const question = document.getElementById('kb-question').value.trim();
+  if (!question) { toast('Scrivi una domanda'); return; }
+  const key = getApiKey();
+  if (!key) { toast('⚠️ Configura la API key'); return; }
+
+  const docs = await kbGetAllDocs();
+  if (!docs.length) { toast('Nessun documento nella KB — caricane prima'); return; }
+
+  const spinner = document.getElementById('kb-ask-spinner');
+  const label = document.getElementById('kb-ask-label');
+  const answer = document.getElementById('kb-answer');
+  spinner.style.display = 'inline-block'; label.textContent = 'Ricerca...';
+
+  try {
+    // Strategia: manda i riassunti di tutti i doc + i PDF completi (fino a 5 per limiti dimensione)
+    const content = [];
+    content.push({ type: 'text', text: `Domanda sulla knowledge base del progetto:\n"${question}"\n\nRispondi basandoti sui documenti allegati. Cita sempre da quale documento proviene l'informazione. Se l'informazione non è nei documenti, dillo chiaramente.` });
+
+    // Allega fino a 5 PDF (limite pratico per dimensione richiesta)
+    const docsToSend = docs.slice(0, 5);
+    for (const d of docsToSend) {
+      content.push({ type: 'text', text: `\n--- Documento: ${d.name} ---` });
+      content.push({ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: d.base64 } });
+    }
+
+    const res = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-api-key': key, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
+      body: JSON.stringify({
+        model: getModel('reasoning'),
+        max_tokens: 1500,
+        system: 'Sei un assistente che risponde a domande basandosi esclusivamente sui documenti forniti nella knowledge base di progetto. ' + getContext(),
+        messages: [{ role: 'user', content }]
+      })
+    });
+    const data = await res.json();
+    spinner.style.display = 'none'; label.textContent = 'Chiedi alla KB';
+
+    if (data.error) { toast('Errore: ' + data.error.message); return; }
+    const text = data.content?.[0]?.text;
+    if (text) {
+      answer.textContent = text;
+      answer.classList.remove('hidden');
+      if (docs.length > 5) {
+        answer.textContent += `\n\n(Nota: analizzati i primi 5 documenti su ${docs.length} totali)`;
+      }
+    }
+  } catch(e) {
+    spinner.style.display = 'none'; label.textContent = 'Chiedi alla KB';
+    toast('Errore: ' + e.message);
   }
 }
 
