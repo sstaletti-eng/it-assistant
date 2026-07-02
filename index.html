@@ -1884,7 +1884,7 @@ function initMsal() {
   }
   if (msalInstance) return; // already initialized
   const config = {
-    auth: { clientId, authority: `https://login.microsoftonline.com/${tenantId}`, redirectUri: window.location.origin },
+    auth: { clientId, authority: `https://login.microsoftonline.com/${tenantId}`, redirectUri: 'https://sstaletti-eng.github.io/it-assistant/' },
     cache: { cacheLocation: 'localStorage', storeAuthStateInCookie: false }
   };
   try {
